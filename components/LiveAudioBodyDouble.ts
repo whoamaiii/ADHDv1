@@ -305,8 +305,7 @@ export class GdmLiveAudioBodyDouble extends LitElement {
       console.log("AI Response (raw):", aiText);
       this.updateStatus(`AI: ${aiText.substring(0, 50)}...`); // Display snippet
 
-      // Placeholder for TTS in next phase
-      // this.speak(aiText);
+      this.speak(aiText); // Call TTS method
 
     } catch (e: any) {
       console.error("Error sending message to Gemini or processing response:", e);
@@ -314,14 +313,52 @@ export class GdmLiveAudioBodyDouble extends LitElement {
     }
   }
 
+  private speak(text: string) {
+    if (!text.trim()) return;
 
-  // Placeholder for TTS - to be implemented in Phase 2
-  // private speak(text: string) {
-  //   if ('speechSynthesis' in window && this.outputAudioContext) {
-  //     // Use window.speechSynthesis.speak()
-  //     console.log(`(TTS Placeholder) Speaking: ${text}`);
-  //   }
-  // }
+    if ('speechSynthesis' in window) {
+      // Cancel any ongoing speech to prevent overlap for this basic implementation.
+      window.speechSynthesis.cancel();
+
+      const utterance = new SpeechSynthesisUtterance(text);
+
+      // Optional: Configure voice, lang, rate, pitch if needed.
+      // For example, to try and match a language if specified or find a preferred voice.
+      // utterance.lang = "en-US"; // Can be dynamic
+      // const voices = window.speechSynthesis.getVoices();
+      // const desiredVoice = voices.find(voice => voice.name === "Google US English"); // Example
+      // if (desiredVoice) {
+      //   utterance.voice = desiredVoice;
+      // }
+
+      utterance.onstart = () => {
+        this.updateStatus("AI Speaking...");
+        console.log("TTS started for:", text);
+      };
+      utterance.onend = () => {
+        // Revert status to something neutral or indicate ready for next input
+        if (!this.isListening) { // Only update if not actively listening for new input
+            this.updateStatus("AI finished. Press Start or speak.");
+        } else {
+            this.updateStatus("🎤 Listening..."); // If continuous listening was a thing, or just "Ready"
+        }
+        console.log("TTS ended for:", text);
+      };
+      utterance.onerror = (event) => {
+        console.error("SpeechSynthesis Error:", event.error);
+        this.updateError(`TTS Error: ${event.error}`);
+        // Potentially revert status if TTS fails
+         if (!this.isListening) {
+            this.updateStatus("TTS failed. Press Start or speak.");
+        }
+      };
+
+      window.speechSynthesis.speak(utterance);
+    } else {
+      this.updateError("Speech Synthesis API not supported by this browser.");
+      console.warn("Speech Synthesis not supported. Cannot speak AI response.");
+    }
+  }
 
   private handleRecognitionError(event: SpeechRecognitionErrorEvent) {
     this.updateError(`Speech Error: ${event.error}`);
