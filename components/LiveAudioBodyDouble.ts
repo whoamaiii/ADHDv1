@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GoogleGenAI, Session } from '@google/genai'; // Removed LiveServerMessage, Modality
+import { GoogleGenAI, Session } from '@google/genai';
 import { LitElement, css, html } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 // Removed createBlob, decode, decodeAudioData as they are not used for STT/TTS directly here yet
@@ -13,37 +13,24 @@ import './visual-3d';
 
 // Attempt to get the SpeechRecognition object, handling vendor prefixes
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-// const SpeechGrammarList = window.SpeechGrammarList || window.webkitSpeechGrammarList; // If needed later
-// const SpeechRecognitionEvent = window.SpeechRecognitionEvent || window.webkitSpeechRecognitionEvent; // If needed later
-
 
 @customElement('gdm-live-audio-body-double')
 export class GdmLiveAudioBodyDouble extends LitElement {
   @property({ type: String, attribute: 'api-key' }) apiKey = '';
 
-  @state() isListening = false; // Changed from isRecording
-  @state() status = 'Inactive. Press Start.'; // Initial status
+  @state() isListening = false;
+  @state() status = 'Inactive. Press Start.';
   @state() error = '';
 
   private client: GoogleGenAI | null = null;
   private session: Session | null = null; // Gemini chat session
   private recognition: SpeechRecognition | null = null;
 
-  // Audio contexts and nodes for visualization - can remain if visualizer is to be used
-  private outputAudioContext: AudioContext | null = null;
-  @state() private outputNode: GainNode | null = null;
-  // Input visualization might be tricky if not directly processing mic stream. For now, removing input related audio nodes.
-  // private inputAudioContext: AudioContext | null = null;
-  // @state() private inputNode: GainNode | null = null;
-
-
-  private nextStartTime = 0; // For TTS playback scheduling
-  private sources = new Set<AudioBufferSourceNode>(); // For managing output audio sources (TTS)
+  // Output audio context and related properties removed as window.speechSynthesis handles playback directly.
 
   static styles = css`
     :host {
       display: block;
-      /* Added some basic styling for visibility */
       border: 1px solid var(--border-light, #ccc);
       border-radius: 8px;
       color: var(--text-primary, #333);
@@ -62,14 +49,12 @@ export class GdmLiveAudioBodyDouble extends LitElement {
       color: var(--error-color, #d9534f);
       font-weight: bold;
     }
-
     .controls {
       display: flex;
       align-items: center;
       justify-content: center;
       flex-direction: row;
       gap: 10px;
-
       button {
         outline: none;
         border: 1px solid var(--border-medium, #ccc);
@@ -85,17 +70,14 @@ export class GdmLiveAudioBodyDouble extends LitElement {
         display: flex;
         align-items: center;
         justify-content: center;
-
         &:hover {
           background: var(--bg-light-accent, #f0f0f0);
         }
       }
-
       button[disabled] {
         opacity: 0.5;
         cursor: not-allowed;
       }
-
       button#startButton, button#stopButton {
          /* Manage visibility via disabled attribute in render logic if needed, or CSS classes */
       }
@@ -109,9 +91,9 @@ export class GdmLiveAudioBodyDouble extends LitElement {
     super();
     if (SpeechRecognition) {
       this.recognition = new SpeechRecognition();
-      this.recognition.continuous = false; // Process after user pauses
-      this.recognition.interimResults = true; // Show interim results for better UX
-      this.recognition.lang = 'en-US'; // Default language
+      this.recognition.continuous = false;
+      this.recognition.interimResults = true;
+      this.recognition.lang = 'en-US';
 
       this.recognition.onresult = this.handleRecognitionResult.bind(this);
       this.recognition.onerror = this.handleRecognitionError.bind(this);
@@ -130,36 +112,18 @@ export class GdmLiveAudioBodyDouble extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    // Initialization that depends on DOM or attributes being set.
-    // API key dependent init is in `updated`.
   }
 
   updated(changedProperties: Map<string | number | symbol, unknown>) {
     if (changedProperties.has('apiKey')) {
       if (this.isListening) {
-        this.stopListening(); // Stop current listening session if API key changes
+        this.stopListening();
       }
       this.client = null;
-      this.session = null; // Reset session too
-
-      // Clear any pending audio output (TTS related, can be kept for now)
-      this.sources.forEach(source => { try { source.stop(); } catch(e){ /* ignore */ } });
-      this.sources.clear();
-      if (this.outputAudioContext) {
-          this.nextStartTime = this.outputAudioContext.currentTime;
-      } else {
-          this.nextStartTime = 0;
-      }
+      this.session = null;
 
       if (this.apiKey) {
         this.initGeminiClient();
-        // Output audio context for TTS (can be initialized here or on first use)
-        if (!this.outputAudioContext || this.outputAudioContext.state === 'closed') {
-            this.outputAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 }); // Standard sample rate for TTS
-            this.outputNode = this.outputAudioContext.createGain();
-            this.outputNode.connect(this.outputAudioContext.destination);
-            this.initAudioPlaybackState(); // For TTS
-        }
       } else {
         this.updateError('API Key is now empty. Live Audio disabled.');
       }
@@ -174,14 +138,7 @@ export class GdmLiveAudioBodyDouble extends LitElement {
     this.client = new GoogleGenAI({ apiKey: this.apiKey });
     this.updateStatus('Client initialized. Ready.');
   }
-  
-  private initAudioPlaybackState() { // For TTS
-    if(this.outputAudioContext){
-      this.nextStartTime = this.outputAudioContext.currentTime;
-    }
-  }
 
-  // Renamed from activateSession to reflect new role
   public async startListening() {
     this.error = '';
     if (!this.apiKey) {
@@ -190,8 +147,8 @@ export class GdmLiveAudioBodyDouble extends LitElement {
     }
     if (!this.client) {
         this.updateError("Gemini client not initialized.");
-        if (this.apiKey) this.initGeminiClient(); // Attempt re-init
-        if (!this.client) return; // If still no client, exit
+        if (this.apiKey) this.initGeminiClient();
+        if (!this.client) return;
     }
     if (!this.recognition) {
         this.updateError("Speech Recognition not available.");
@@ -203,21 +160,21 @@ export class GdmLiveAudioBodyDouble extends LitElement {
       return;
     }
 
-    // Initialize Gemini Chat Session if it doesn't exist or needs reset
     if (!this.session) {
       try {
         await this.initGeminiChatSession();
       } catch (e) {
-        // Error already handled in initGeminiChatSession
         return;
       }
     }
 
     if (this.session) {
       try {
+        if ('speechSynthesis' in window && window.speechSynthesis.speaking) {
+            window.speechSynthesis.cancel();
+        }
         this.recognition.start();
         this.isListening = true;
-        // Status will be updated by recognition.onstart
       } catch (e: any) {
         this.updateError(`Error starting speech recognition: ${e.message}`);
         console.error("Error starting SpeechRecognition:", e);
@@ -228,14 +185,10 @@ export class GdmLiveAudioBodyDouble extends LitElement {
     }
   }
 
-  // Renamed from deactivateSession
   public stopListening() {
     if (this.recognition && this.isListening) {
-      this.recognition.stop(); // This will trigger onend event where isListening is set to false
-      // Status update will happen in onend or onerror
+      this.recognition.stop();
     }
-    // Session is not closed here, could be reused. Or close it if desired.
-    // For now, let's keep the session open for subsequent interactions until reset.
   }
 
   private async initGeminiChatSession() {
@@ -243,7 +196,7 @@ export class GdmLiveAudioBodyDouble extends LitElement {
       this.updateError('Gemini client not initialized.');
       throw new Error('Gemini client not initialized.');
     }
-    const model = 'gemini-1.5-flash-latest'; // Using a common model, ensure it's chat-compatible
+    const model = 'gemini-1.5-flash-latest';
 
     try {
       this.updateStatus('Initializing AI session...');
@@ -254,9 +207,10 @@ export class GdmLiveAudioBodyDouble extends LitElement {
       this.updateStatus('AI session ready. Start speaking.');
     } catch (e: any) {
       console.error('Error initializing Gemini session:', e);
-      this.updateError(`AI session error: ${e.message}`);
+      const errorMsg = e instanceof Error ? e.message : String(e);
+      this.updateError(`AI session initialization error: ${errorMsg}`);
       this.session = null;
-      throw e; // Re-throw to be caught by caller if needed
+      throw e;
     }
   }
 
@@ -272,7 +226,6 @@ export class GdmLiveAudioBodyDouble extends LitElement {
       }
     }
 
-    // Update UI with interim results for responsiveness
     if (interimTranscript) {
         this.updateStatus(`Thinking: ${interimTranscript}`);
     }
@@ -287,29 +240,29 @@ export class GdmLiveAudioBodyDouble extends LitElement {
   private async sendTranscriptToGemini(text: string) {
     if (!this.session) {
       this.updateError("AI session not active. Cannot send message.");
-      // Optionally try to re-initialize session here
-      // await this.initGeminiChatSession();
-      // if (!this.session) return;
       return;
     }
     if (!text) return;
 
     this.updateStatus("Sending to AI...");
     try {
-      // const response = await this.session.sendMessageStream(text); // For streaming
-      // For now, let's use non-streaming sendMessage
       const result = await this.session.sendMessage(text);
       const response = await result.response;
-      const aiText = response.text();
-
-      console.log("AI Response (raw):", aiText);
-      this.updateStatus(`AI: ${aiText.substring(0, 50)}...`); // Display snippet
-
-      this.speak(aiText); // Call TTS method
-
+      if (response && typeof response.text === 'function') {
+        const aiText = response.text();
+        console.log("AI Response (raw):", aiText);
+        this.updateStatus(`AI: ${aiText.substring(0, 50)}...`);
+        this.speak(aiText);
+      } else {
+        throw new Error("Invalid or unexpected response structure from AI.");
+      }
     } catch (e: any) {
-      console.error("Error sending message to Gemini or processing response:", e);
-      this.updateError(`AI Error: ${e.message}`);
+      console.error("Error sending/receiving message with AI:", e);
+      const errorMsg = e instanceof Error ? e.message : String(e);
+      this.updateError(`AI Communication Error: ${errorMsg}`);
+      if (!this.isListening) {
+        this.updateStatus("Error with AI. Please try again.");
+      }
     }
   }
 
@@ -317,60 +270,74 @@ export class GdmLiveAudioBodyDouble extends LitElement {
     if (!text.trim()) return;
 
     if ('speechSynthesis' in window) {
-      // Cancel any ongoing speech to prevent overlap for this basic implementation.
       window.speechSynthesis.cancel();
 
       const utterance = new SpeechSynthesisUtterance(text);
-
-      // Optional: Configure voice, lang, rate, pitch if needed.
-      // For example, to try and match a language if specified or find a preferred voice.
-      // utterance.lang = "en-US"; // Can be dynamic
-      // const voices = window.speechSynthesis.getVoices();
-      // const desiredVoice = voices.find(voice => voice.name === "Google US English"); // Example
-      // if (desiredVoice) {
-      //   utterance.voice = desiredVoice;
-      // }
 
       utterance.onstart = () => {
         this.updateStatus("AI Speaking...");
         console.log("TTS started for:", text);
       };
       utterance.onend = () => {
-        // Revert status to something neutral or indicate ready for next input
-        if (!this.isListening) { // Only update if not actively listening for new input
+        if (!this.isListening) {
             this.updateStatus("AI finished. Press Start or speak.");
         } else {
-            this.updateStatus("🎤 Listening..."); // If continuous listening was a thing, or just "Ready"
+            this.updateStatus("🎤 Listening...");
         }
         console.log("TTS ended for:", text);
       };
-      utterance.onerror = (event) => {
-        console.error("SpeechSynthesis Error:", event.error);
-        this.updateError(`TTS Error: ${event.error}`);
-        // Potentially revert status if TTS fails
+      utterance.onerror = (ttsErrorEvent) => {
+        const errorType = (ttsErrorEvent as SpeechSynthesisErrorEvent).error || 'unknown';
+        console.error("SpeechSynthesis Error:", errorType);
+        this.updateError(`TTS Error: '${errorType}'. Could not speak AI response.`);
          if (!this.isListening) {
-            this.updateStatus("TTS failed. Press Start or speak.");
+            this.updateStatus("TTS failed. Ready to try again.");
         }
       };
 
       window.speechSynthesis.speak(utterance);
     } else {
       this.updateError("Speech Synthesis API not supported by this browser.");
-      console.warn("Speech Synthesis not supported. Cannot speak AI response.");
     }
   }
 
   private handleRecognitionError(event: SpeechRecognitionErrorEvent) {
-    this.updateError(`Speech Error: ${event.error}`);
-    console.error("SpeechRecognition Error:", event.error, event.message);
-    this.isListening = false; // Ensure state is updated
-    // Potentially add more specific error handling based on event.error type
-    // e.g. 'not-allowed', 'no-speech', 'network'
+    let errorMsg = `Speech Error: ${event.error}.`;
+    switch (event.error) {
+      case 'no-speech':
+        errorMsg = "No speech was detected. Please try again.";
+        break;
+      case 'audio-capture':
+        errorMsg = "Audio capture failed. Please check your microphone and system audio settings.";
+        break;
+      case 'not-allowed':
+        errorMsg = "Microphone permission denied. Please enable microphone access in your browser settings for this site.";
+        break;
+      case 'network':
+        errorMsg = "A network error occurred during speech recognition. Please check your internet connection.";
+        break;
+      case 'aborted':
+        errorMsg = "Speech recognition was aborted. If this was unexpected, please try again.";
+        break;
+      case 'language-not-supported':
+        errorMsg = "The configured language is not supported for speech recognition by your browser.";
+        break;
+      case 'service-not-allowed':
+        errorMsg = "The speech recognition service is not allowed by your browser or operating system. Check security settings.";
+        break;
+      case 'bad-grammar':
+        errorMsg = "There was an error with the speech recognition grammar configuration.";
+        break;
+      default:
+        errorMsg = `An unexpected speech recognition error occurred: ${event.error}.`;
+    }
+    this.updateError(errorMsg);
+    console.error("SpeechRecognition Error Details:", { errorType: event.error, message: event.message || "No additional message." });
+    this.isListening = false;
   }
 
   private handleRecognitionEnd() {
     this.isListening = false;
-    // Don't show "stopped" if an error occurred, as error message is more specific
     if (!this.error) {
         this.updateStatus("Listening stopped. Press Start.");
     }
@@ -379,7 +346,6 @@ export class GdmLiveAudioBodyDouble extends LitElement {
 
   private updateStatus(msg: string) {
     this.status = msg;
-    // Clear error when status updates, unless it's an error status itself
     if (!msg.toLowerCase().includes("error")) {
         this.error = '';
     }
@@ -387,17 +353,13 @@ export class GdmLiveAudioBodyDouble extends LitElement {
 
   private updateError(msg: string) {
     this.error = msg;
-    this.status = ''; // Clear status when error occurs
+    this.status = '';
     console.error("LiveAudio Error:", msg);
   }
-
-  // Removed old startRecording, stopRecording, processMessage methods
 
   private handleResetClick() {
     this.stopListening();
     if (this.session) {
-        // Decide if session.close() is needed or if a new session is created on next start
-        // For now, let's nullify it to force re-creation with potentially fresh history.
         this.session = null;
     }
     this.updateStatus('Session Reset. Ready to Start.');
@@ -408,22 +370,15 @@ export class GdmLiveAudioBodyDouble extends LitElement {
     super.disconnectedCallback();
     this.stopListening();
     if (this.recognition) {
-        // Clean up event listeners to prevent memory leaks if element is re-added
         this.recognition.onresult = null;
         this.recognition.onerror = null;
         this.recognition.onend = null;
         this.recognition.onstart = null;
-        // ... and other event listeners
-        this.recognition = null; // Release the object
-    }
-    // Close audio contexts if they exist and are open
-    // if(this.inputAudioContext && this.inputAudioContext.state !== 'closed') {
-    //   this.inputAudioContext.close().catch(e => console.error("Error closing input audio context:", e));
-    //   this.inputAudioContext = null;
-    // }
-    if(this.outputAudioContext && this.outputAudioContext.state !== 'closed') {
-      this.outputAudioContext.close().catch(e => console.error("Error closing output audio context:", e));
-      this.outputAudioContext = null;
+        this.recognition.onaudiostart = null;
+        this.recognition.onaudioend = null;
+        this.recognition.onspeechstart = null;
+        this.recognition.onspeechend = null;
+        this.recognition = null;
     }
   }
 
@@ -470,23 +425,16 @@ export class GdmLiveAudioBodyDouble extends LitElement {
         </button>
       </div>
       <gdm-live-audio-visuals-3d
-        .inputNode=${null} /* Input node from mic stream is no longer directly available this way */
-        .outputNode=${this.outputNode}
+        .inputNode=${null}
+        .outputNode=${null} /* OutputNode also set to null as its AudioContext is removed */
       ></gdm-live-audio-visuals-3d>
     `;
   }
 }
 
-// Update global interface for SpeechRecognition types if not already present from a lib
 declare global {
   interface Window {
     SpeechRecognition: typeof SpeechRecognition;
     webkitSpeechRecognition: typeof SpeechRecognition;
-    // SpeechGrammarList: typeof SpeechGrammarList;
-    // webkitSpeechGrammarList: typeof SpeechGrammarList;
-    // SpeechRecognitionEvent: typeof SpeechRecognitionEvent;
-    // webkitSpeechRecognitionEvent: typeof SpeechRecognitionEvent;
   }
-  // Fallback for createScriptProcessor was here, removed as no longer needed.
 }
-
