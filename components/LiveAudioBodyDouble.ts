@@ -4,51 +4,62 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GoogleGenAI, LiveServerMessage, Modality, Session } from '@google/genai';
+import { GoogleGenAI, Session } from '@google/genai'; // Removed LiveServerMessage, Modality
 import { LitElement, css, html } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { createBlob, decode, decodeAudioData } from './utils'; // Assuming utils.ts exists or will be created
-import './visual-3d'; // Ensure this path is correct relative to this file or adjust as needed
+// Removed createBlob, decode, decodeAudioData as they are not used for STT/TTS directly here yet
+// import { createBlob, decode, decodeAudioData } from './utils';
+import './visual-3d';
+
+// Attempt to get the SpeechRecognition object, handling vendor prefixes
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+// const SpeechGrammarList = window.SpeechGrammarList || window.webkitSpeechGrammarList; // If needed later
+// const SpeechRecognitionEvent = window.SpeechRecognitionEvent || window.webkitSpeechRecognitionEvent; // If needed later
+
 
 @customElement('gdm-live-audio-body-double')
 export class GdmLiveAudioBodyDouble extends LitElement {
-  @property({ type: String, attribute: 'api-key' }) apiKey = ''; // Explicitly map to api-key attribute
+  @property({ type: String, attribute: 'api-key' }) apiKey = '';
 
-  @state() isRecording = false;
-  @state() status = 'Inactive';
+  @state() isListening = false; // Changed from isRecording
+  @state() status = 'Inactive. Press Start.'; // Initial status
   @state() error = '';
 
   private client: GoogleGenAI | null = null;
-  private session: Session | null = null;
-  private inputAudioContext: AudioContext | null = null;
-  private outputAudioContext: AudioContext | null = null;
-  
-  @state() private inputNode: GainNode | null = null;
-  @state() private outputNode: GainNode | null = null;
+  private session: Session | null = null; // Gemini chat session
+  private recognition: SpeechRecognition | null = null;
 
-  private nextStartTime = 0;
-  private mediaStream: MediaStream | null = null;
-  private mediaStreamSourceNode: MediaStreamAudioSourceNode | null = null;
-  private scriptProcessorNode: ScriptProcessorNode | null = null;
-  private sources = new Set<AudioBufferSourceNode>(); // For managing output audio sources
+  // Audio contexts and nodes for visualization - can remain if visualizer is to be used
+  private outputAudioContext: AudioContext | null = null;
+  @state() private outputNode: GainNode | null = null;
+  // Input visualization might be tricky if not directly processing mic stream. For now, removing input related audio nodes.
+  // private inputAudioContext: AudioContext | null = null;
+  // @state() private inputNode: GainNode | null = null;
+
+
+  private nextStartTime = 0; // For TTS playback scheduling
+  private sources = new Set<AudioBufferSourceNode>(); // For managing output audio sources (TTS)
 
   static styles = css`
     :host {
       display: block;
-      color: var(--text-primary); /* Use app's text color */
-      padding: 10px; /* Add some padding for the component itself */
+      /* Added some basic styling for visibility */
+      border: 1px solid var(--border-light, #ccc);
+      border-radius: 8px;
+      color: var(--text-primary, #333);
+      padding: 10px;
     }
     #status-error-container {
-      min-height: 20px; /* Ensure space for status/error messages */
+      min-height: 20px;
       margin-bottom: 10px;
       text-align: center;
       font-size: 0.8em;
     }
     #status-text {
-      color: var(--text-secondary);
+      color: var(--text-secondary, #555);
     }
     #error-text {
-      color: var(--error-color);
+      color: var(--error-color, #d9534f);
       font-weight: bold;
     }
 
@@ -56,19 +67,19 @@ export class GdmLiveAudioBodyDouble extends LitElement {
       display: flex;
       align-items: center;
       justify-content: center;
-      flex-direction: row; /* Changed to row for a more compact layout */
+      flex-direction: row;
       gap: 10px;
 
       button {
         outline: none;
-        border: 1px solid var(--border-medium);
-        color: var(--text-primary);
-        border-radius: 8px; /* Slightly less rounded */
-        background: var(--bg-card); /* Use app's card background */
-        width: 48px; /* Adjusted size */
+        border: 1px solid var(--border-medium, #ccc);
+        color: var(--text-primary, #333);
+        border-radius: 8px;
+        background: var(--bg-card, #fff);
+        width: 48px;
         height: 48px;
         cursor: pointer;
-        font-size: 20px; /* Adjusted size */
+        font-size: 20px;
         padding: 0;
         margin: 0;
         display: flex;
@@ -76,7 +87,7 @@ export class GdmLiveAudioBodyDouble extends LitElement {
         justify-content: center;
 
         &:hover {
-          background: var(--bg-light-accent); /* Use app's light accent for hover */
+          background: var(--bg-light-accent, #f0f0f0);
         }
       }
 
@@ -84,31 +95,54 @@ export class GdmLiveAudioBodyDouble extends LitElement {
         opacity: 0.5;
         cursor: not-allowed;
       }
-      /* Specific styling for start/stop buttons to hide one based on state */
-      button#startButton[disabled], button#stopButton[disabled] {
-        display: none;
+
+      button#startButton, button#stopButton {
+         /* Manage visibility via disabled attribute in render logic if needed, or CSS classes */
       }
     }
     svg {
-      fill: var(--text-primary); /* Ensure SVG icons use app's text color */
+      fill: var(--text-primary, #333);
     }
   `;
 
+  constructor() {
+    super();
+    if (SpeechRecognition) {
+      this.recognition = new SpeechRecognition();
+      this.recognition.continuous = false; // Process after user pauses
+      this.recognition.interimResults = true; // Show interim results for better UX
+      this.recognition.lang = 'en-US'; // Default language
+
+      this.recognition.onresult = this.handleRecognitionResult.bind(this);
+      this.recognition.onerror = this.handleRecognitionError.bind(this);
+      this.recognition.onend = this.handleRecognitionEnd.bind(this);
+      this.recognition.onstart = () => this.updateStatus("🎤 Listening...");
+      this.recognition.onaudiostart = () => console.log("Audio capture started.");
+      this.recognition.onaudioend = () => console.log("Audio capture ended.");
+      this.recognition.onspeechstart = () => console.log("Speech detected.");
+      this.recognition.onspeechend = () => console.log("Speech ended.");
+
+    } else {
+      this.updateError("Speech Recognition API not supported by this browser.");
+      console.error("Speech Recognition API not supported.");
+    }
+  }
+
   connectedCallback() {
     super.connectedCallback();
-    // apiKey might not be set yet if passed as an attribute.
-    // Initialization will be handled by `updated` when apiKey is set.
+    // Initialization that depends on DOM or attributes being set.
+    // API key dependent init is in `updated`.
   }
 
   updated(changedProperties: Map<string | number | symbol, unknown>) {
     if (changedProperties.has('apiKey')) {
-      // API key has changed (or first set). Deactivate existing session and client.
-      if (this.session || this.isRecording) {
-        this.deactivateSession(); // Stops recording and closes the session.
+      if (this.isListening) {
+        this.stopListening(); // Stop current listening session if API key changes
       }
-      this.client = null; // Nullify client to force re-initialization
+      this.client = null;
+      this.session = null; // Reset session too
 
-      // Clear any pending audio output
+      // Clear any pending audio output (TTS related, can be kept for now)
       this.sources.forEach(source => { try { source.stop(); } catch(e){ /* ignore */ } });
       this.sources.clear();
       if (this.outputAudioContext) {
@@ -118,280 +152,238 @@ export class GdmLiveAudioBodyDouble extends LitElement {
       }
 
       if (this.apiKey) {
-        this.initClientAndContexts();
+        this.initGeminiClient();
+        // Output audio context for TTS (can be initialized here or on first use)
+        if (!this.outputAudioContext || this.outputAudioContext.state === 'closed') {
+            this.outputAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 }); // Standard sample rate for TTS
+            this.outputNode = this.outputAudioContext.createGain();
+            this.outputNode.connect(this.outputAudioContext.destination);
+            this.initAudioPlaybackState(); // For TTS
+        }
       } else {
         this.updateError('API Key is now empty. Live Audio disabled.');
-        // Client is already nullified. Contexts will remain but won't be used.
       }
     }
   }
 
-  private initClientAndContexts() {
-    this.error = ''; // Clear previous errors on init
+  private initGeminiClient() {
     if (!this.apiKey) {
-      this.updateError('API Key is missing for Live Audio.');
-      this.client = null;
-      // AudioContexts might still exist but will be unusable without a client
-      this.updateStatus('API Key missing.');
+      this.updateError('API Key is missing. Cannot initialize Gemini Client.');
       return;
     }
-
     this.client = new GoogleGenAI({ apiKey: this.apiKey });
-    
-    // Initialize AudioContexts if they don't exist or were closed
-    if (!this.inputAudioContext || this.inputAudioContext.state === 'closed') {
-        this.inputAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-    }
-    // Create or re-create gain node for input visualizer
-    this.inputNode = this.inputAudioContext.createGain();
-
-    if (!this.outputAudioContext || this.outputAudioContext.state === 'closed') {
-        this.outputAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
-    }
-    // Create or re-create gain node for output visualizer and connect to destination
-    this.outputNode = this.outputAudioContext.createGain();
-    this.outputNode.connect(this.outputAudioContext.destination);
-    
-    this.initAudioPlaybackState();
-    this.updateStatus('Ready. Press Start.');
+    this.updateStatus('Client initialized. Ready.');
   }
   
-  private initAudioPlaybackState() {
+  private initAudioPlaybackState() { // For TTS
     if(this.outputAudioContext){
       this.nextStartTime = this.outputAudioContext.currentTime;
     }
   }
 
-  public async activateSession() {
-    this.error = ''; // Clear previous errors
+  // Renamed from activateSession to reflect new role
+  public async startListening() {
+    this.error = '';
     if (!this.apiKey) {
-        this.updateError("API Key is not set. Cannot activate session.");
+        this.updateError("API Key is not set. Cannot start listening.");
         return;
     }
-    if (!this.client || !this.inputAudioContext || !this.outputAudioContext) {
-        this.updateError("Audio client/context not initialized.");
-        // Attempt re-init if API key is present but client/contexts are somehow not set up
-        if (this.apiKey) {
-            console.warn("activateSession: Client/contexts not initialized despite API key. Attempting re-init.");
-            this.initClientAndContexts();
-        }
-        // Check again after potential re-init
-        if(!this.client || !this.inputAudioContext || !this.outputAudioContext) {
-             this.updateError("Audio client/context failed to initialize. Cannot activate session.");
-             return;
-        }
-    }
-
-    if (!this.session) {
-      // initSession is async, but it's not clear if await is needed here as it sets this.session
-      // Let's assume initSession updates status and handles its own errors.
-      await this.initSession(); 
-    }
-
-    if (this.session && !this.isRecording) {
-      // startRecording is async
-      await this.startRecording();
-    } else if (!this.session) {
-        this.updateError("Failed to initialize session. Cannot start recording.");
-    }
-  }
-
-  public deactivateSession() {
-    this.stopRecording(); // This is synchronous
-    if (this.session) {
-      // Assuming session.close() is synchronous or we don't need to wait for it.
-      // If session.close() were async and important to await: `await this.session.close();`
-      this.session.close();
-      this.session = null;
-    }
-    this.updateStatus('Session ended. Click Start to begin again.');
-  }
-
-  private async initSession() {
     if (!this.client) {
-      this.updateError('Gemini client not initialized.');
+        this.updateError("Gemini client not initialized.");
+        if (this.apiKey) this.initGeminiClient(); // Attempt re-init
+        if (!this.client) return; // If still no client, exit
+    }
+    if (!this.recognition) {
+        this.updateError("Speech Recognition not available.");
+        return;
+    }
+
+    if (this.isListening) {
+      this.updateStatus("Already listening.");
       return;
     }
-    // Using a model consistent with general guidelines
-    const model = 'gemini-2.5-flash-preview-04-17'; 
+
+    // Initialize Gemini Chat Session if it doesn't exist or needs reset
+    if (!this.session) {
+      try {
+        await this.initGeminiChatSession();
+      } catch (e) {
+        // Error already handled in initGeminiChatSession
+        return;
+      }
+    }
+
+    if (this.session) {
+      try {
+        this.recognition.start();
+        this.isListening = true;
+        // Status will be updated by recognition.onstart
+      } catch (e: any) {
+        this.updateError(`Error starting speech recognition: ${e.message}`);
+        console.error("Error starting SpeechRecognition:", e);
+        this.isListening = false;
+      }
+    } else {
+         this.updateError("Failed to initialize AI session. Cannot start listening.");
+    }
+  }
+
+  // Renamed from deactivateSession
+  public stopListening() {
+    if (this.recognition && this.isListening) {
+      this.recognition.stop(); // This will trigger onend event where isListening is set to false
+      // Status update will happen in onend or onerror
+    }
+    // Session is not closed here, could be reused. Or close it if desired.
+    // For now, let's keep the session open for subsequent interactions until reset.
+  }
+
+  private async initGeminiChatSession() {
+    if (!this.client) {
+      this.updateError('Gemini client not initialized.');
+      throw new Error('Gemini client not initialized.');
+    }
+    const model = 'gemini-1.5-flash-latest'; // Using a common model, ensure it's chat-compatible
 
     try {
-      this.updateStatus('Connecting to AI...');
+      this.updateStatus('Initializing AI session...');
       this.session = await this.client.chat.create({
         model: model,
-        systemInstruction: { parts: [{ text: "You are a friendly and supportive companion. The user is currently cleaning their space. Your role is to keep them company with light, engaging conversation. You can ask how they're feeling, chat about interesting topics, or offer general encouragement. Avoid giving specific cleaning instructions. Just be a pleasant presence."}]},
+        systemInstruction: { parts: [{ text: "You are a friendly and supportive companion. The user is currently cleaning their space. Your role is to keep them company with light, engaging conversation. You can ask how they're feeling, chat about interesting topics, or offer general encouragement. Avoid giving specific cleaning instructions. Just be a pleasant presence. Keep your responses concise, typically one or two sentences."}]},
       });
-      this.updateStatus('Connected. Ready to record.');
+      this.updateStatus('AI session ready. Start speaking.');
     } catch (e: any) {
-      console.error('Error initializing session:', e);
-      this.updateError(`Session init error: ${e.message}`);
-      this.session = null; // Ensure session is null on error
+      console.error('Error initializing Gemini session:', e);
+      this.updateError(`AI session error: ${e.message}`);
+      this.session = null;
+      throw e; // Re-throw to be caught by caller if needed
     }
   }
 
+  private handleRecognitionResult(event: SpeechRecognitionEvent) {
+    let interimTranscript = '';
+    let finalTranscript = '';
 
-  private async processMessage(message: LiveServerMessage) { 
-    const audio = message.serverContent?.modelTurn?.parts[0]?.inlineData;
-    if (audio && this.outputAudioContext && this.outputNode) {
-      this.nextStartTime = Math.max(
-        this.nextStartTime,
-        this.outputAudioContext.currentTime,
-      );
-      try {
-        const audioBuffer = await decodeAudioData(
-          decode(audio.data), 
-          this.outputAudioContext,
-          24000, 
-          1,     
-        );
-        const source = this.outputAudioContext.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(this.outputNode);
-        source.addEventListener('ended', () => {
-          this.sources.delete(source);
-        });
-        source.start(this.nextStartTime);
-        this.nextStartTime = this.nextStartTime + audioBuffer.duration;
-        this.sources.add(source);
-      } catch (err) {
-        console.error("Error decoding or playing audio:", err);
-        this.updateError("Playback error.");
-      }
-    }
-
-    const interrupted = message.serverContent?.interrupted;
-    if (interrupted) {
-      for (const source of this.sources.values()) {
-        try { source.stop(); } catch(e) {/* ignore */}
-        this.sources.delete(source);
-      }
-      if (this.outputAudioContext) {
-        this.nextStartTime = this.outputAudioContext.currentTime;
+    for (let i = event.resultIndex; i < event.results.length; ++i) {
+      if (event.results[i].isFinal) {
+        finalTranscript += event.results[i][0].transcript;
       } else {
-        this.nextStartTime = 0;
+        interimTranscript += event.results[i][0].transcript;
       }
+    }
+
+    // Update UI with interim results for responsiveness
+    if (interimTranscript) {
+        this.updateStatus(`Thinking: ${interimTranscript}`);
+    }
+
+    if (finalTranscript) {
+      this.updateStatus(`You said: ${finalTranscript.trim()}`);
+      console.log(`Final transcript: ${finalTranscript.trim()}`);
+      this.sendTranscriptToGemini(finalTranscript.trim());
     }
   }
 
+  private async sendTranscriptToGemini(text: string) {
+    if (!this.session) {
+      this.updateError("AI session not active. Cannot send message.");
+      // Optionally try to re-initialize session here
+      // await this.initGeminiChatSession();
+      // if (!this.session) return;
+      return;
+    }
+    if (!text) return;
+
+    this.updateStatus("Sending to AI...");
+    try {
+      // const response = await this.session.sendMessageStream(text); // For streaming
+      // For now, let's use non-streaming sendMessage
+      const result = await this.session.sendMessage(text);
+      const response = await result.response;
+      const aiText = response.text();
+
+      console.log("AI Response (raw):", aiText);
+      this.updateStatus(`AI: ${aiText.substring(0, 50)}...`); // Display snippet
+
+      // Placeholder for TTS in next phase
+      // this.speak(aiText);
+
+    } catch (e: any) {
+      console.error("Error sending message to Gemini or processing response:", e);
+      this.updateError(`AI Error: ${e.message}`);
+    }
+  }
+
+
+  // Placeholder for TTS - to be implemented in Phase 2
+  // private speak(text: string) {
+  //   if ('speechSynthesis' in window && this.outputAudioContext) {
+  //     // Use window.speechSynthesis.speak()
+  //     console.log(`(TTS Placeholder) Speaking: ${text}`);
+  //   }
+  // }
+
+  private handleRecognitionError(event: SpeechRecognitionErrorEvent) {
+    this.updateError(`Speech Error: ${event.error}`);
+    console.error("SpeechRecognition Error:", event.error, event.message);
+    this.isListening = false; // Ensure state is updated
+    // Potentially add more specific error handling based on event.error type
+    // e.g. 'not-allowed', 'no-speech', 'network'
+  }
+
+  private handleRecognitionEnd() {
+    this.isListening = false;
+    // Don't show "stopped" if an error occurred, as error message is more specific
+    if (!this.error) {
+        this.updateStatus("Listening stopped. Press Start.");
+    }
+    console.log("Speech recognition service ended.");
+  }
 
   private updateStatus(msg: string) {
     this.status = msg;
-    this.error = ''; 
+    // Clear error when status updates, unless it's an error status itself
+    if (!msg.toLowerCase().includes("error")) {
+        this.error = '';
+    }
   }
 
   private updateError(msg: string) {
     this.error = msg;
+    this.status = ''; // Clear status when error occurs
     console.error("LiveAudio Error:", msg);
   }
 
-  private async startRecording() {
-    if (this.isRecording) return;
-    if (!this.inputAudioContext || !this.inputNode || !this.session) {
-      this.updateError('Audio context or session not ready for recording.');
-      this.isRecording = false; 
-      return;
-    }
-
-    // Ensure AudioContext is running
-    if (this.inputAudioContext.state === 'suspended') {
-        await this.inputAudioContext.resume();
-    }
-    this.updateStatus('Requesting microphone...');
-
-    try {
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-            sampleRate: 16000, 
-            channelCount: 1,    
-            echoCancellation: true,
-        },
-        video: false,
-      });
-
-      this.updateStatus('Mic granted. Capturing...');
-      this.mediaStreamSourceNode = this.inputAudioContext.createMediaStreamSource(this.mediaStream);
-      this.mediaStreamSourceNode.connect(this.inputNode); // Connect to visualizer node
-
-      const bufferSize = 4096; 
-      // Fallback for older browsers that might not have AudioWorklet widely supported or for simplicity.
-      // For modern applications, AudioWorklet is preferred over ScriptProcessorNode.
-      if (!this.inputAudioContext.createScriptProcessor) {
-        this.updateError("ScriptProcessorNode not supported. Audio input may not work.");
-        // Potentially fall back to AudioWorklet if implemented, or accept failure.
-        return;
-      }
-      this.scriptProcessorNode = this.inputAudioContext.createScriptProcessor(bufferSize, 1, 1);
-
-      this.scriptProcessorNode.onaudioprocess = (audioProcessingEvent) => {
-        if (!this.isRecording || !this.session) return;
-        const inputBuffer = audioProcessingEvent.inputBuffer;
-        const pcmData = inputBuffer.getChannelData(0); 
-
-         try {
-            // This section remains a placeholder as per original code's intent.
-            // Direct audio blob sending to a standard Gemini chat session is not supported.
-            // This would require STT -> chat.sendMessage -> TTS.
-             console.log("Attempting to send audio data chunk (placeholder)...");
-             // Example: this.session.sendRealtimeInput({media: createBlob(pcmData)}); 
-         } catch (e) {
-             console.error("Error sending audio data (placeholder):", e);
-             this.updateError("Error sending audio.");
-             this.stopRecording();
-         }
-      };
-
-      this.mediaStreamSourceNode.connect(this.scriptProcessorNode);
-      // DO NOT connect scriptProcessorNode to destination, to avoid hearing raw mic input.
-      // this.scriptProcessorNode.connect(this.inputAudioContext.destination); // Removed this line
-
-      this.isRecording = true;
-      this.updateStatus('🔴 Recording...');
-    } catch (err: any) {
-      console.error('Error starting recording:', err);
-      this.updateError(`Mic Error: ${err.message}`);
-      this.stopRecording(); 
-    }
-  }
-
-  private stopRecording() {
-    if (!this.isRecording && !this.mediaStream && !this.inputAudioContext) {
-      // Only update status if it was genuinely trying to stop something or was in an active state.
-      if (this.isRecording) this.updateStatus('Recording stopped.');
-      this.isRecording = false;
-      return;
-    }
-    
-    this.isRecording = false; 
-
-    if (this.scriptProcessorNode) {
-      this.scriptProcessorNode.onaudioprocess = null; 
-      this.scriptProcessorNode.disconnect();
-      this.scriptProcessorNode = null;
-    }
-    if (this.mediaStreamSourceNode) {
-      this.mediaStreamSourceNode.disconnect();
-      this.mediaStreamSourceNode = null;
-    }
-    if (this.mediaStream) {
-      this.mediaStream.getTracks().forEach((track) => track.stop());
-      this.mediaStream = null;
-    }
-    
-    this.updateStatus('Recording stopped.');
-  }
+  // Removed old startRecording, stopRecording, processMessage methods
 
   private handleResetClick() {
-    this.deactivateSession(); 
+    this.stopListening();
+    if (this.session) {
+        // Decide if session.close() is needed or if a new session is created on next start
+        // For now, let's nullify it to force re-creation with potentially fresh history.
+        this.session = null;
+    }
     this.updateStatus('Session Reset. Ready to Start.');
+    this.error = '';
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
-    this.deactivateSession(); 
-    if(this.inputAudioContext && this.inputAudioContext.state !== 'closed') {
-      this.inputAudioContext.close().catch(e => console.error("Error closing input audio context:", e));
-      this.inputAudioContext = null;
+    this.stopListening();
+    if (this.recognition) {
+        // Clean up event listeners to prevent memory leaks if element is re-added
+        this.recognition.onresult = null;
+        this.recognition.onerror = null;
+        this.recognition.onend = null;
+        this.recognition.onstart = null;
+        // ... and other event listeners
+        this.recognition = null; // Release the object
     }
+    // Close audio contexts if they exist and are open
+    // if(this.inputAudioContext && this.inputAudioContext.state !== 'closed') {
+    //   this.inputAudioContext.close().catch(e => console.error("Error closing input audio context:", e));
+    //   this.inputAudioContext = null;
+    // }
     if(this.outputAudioContext && this.outputAudioContext.state !== 'closed') {
       this.outputAudioContext.close().catch(e => console.error("Error closing output audio context:", e));
       this.outputAudioContext = null;
@@ -399,6 +391,9 @@ export class GdmLiveAudioBodyDouble extends LitElement {
   }
 
   render() {
+    if (!SpeechRecognition) {
+      return html`<div id="status-error-container"><div id="error-text">Speech Recognition API not supported here.</div></div>`;
+    }
     return html`
       <div id="status-error-container">
         ${this.error ? html`<div id="error-text">${this.error}</div>` : html`<div id="status-text">${this.status}</div>`}
@@ -407,7 +402,7 @@ export class GdmLiveAudioBodyDouble extends LitElement {
         <button
           id="resetButton"
           @click=${this.handleResetClick}
-          ?disabled=${this.isRecording && false} /* Reset should ideally always be enabled, or disabled only during critical ops */
+          ?disabled=${this.isListening && false}
           title="Reset Session"
         >
           <svg xmlns="http://www.w3.org/2000/svg" height="24px" viewBox="0 -960 960 960" width="24px">
@@ -416,9 +411,10 @@ export class GdmLiveAudioBodyDouble extends LitElement {
         </button>
         <button
           id="startButton"
-          @click=${this.activateSession} 
-          ?disabled=${this.isRecording || !this.apiKey} /* Also disable if no API key */
-          title="Start Recording"
+          @click=${this.startListening}
+          ?disabled=${this.isListening || !this.apiKey}
+          title="Start Listening"
+          style="display: ${this.isListening ? 'none' : 'flex'}"
         >
           <svg viewBox="0 0 100 100" width="24px" height="24px" fill="#c80000">
             <circle cx="50" cy="50" r="50" />
@@ -426,9 +422,10 @@ export class GdmLiveAudioBodyDouble extends LitElement {
         </button>
         <button
           id="stopButton"
-          @click=${this.deactivateSession}
-          ?disabled=${!this.isRecording}
-          title="Stop Recording"
+          @click=${this.stopListening}
+          ?disabled=${!this.isListening}
+          title="Stop Listening"
+          style="display: ${this.isListening ? 'flex' : 'none'}"
         >
           <svg viewBox="0 0 100 100" width="24px" height="24px" fill="#000000">
             <rect x="0" y="0" width="100" height="100" rx="15" />
@@ -436,20 +433,23 @@ export class GdmLiveAudioBodyDouble extends LitElement {
         </button>
       </div>
       <gdm-live-audio-visuals-3d
-        .inputNode=${this.inputNode}
+        .inputNode=${null} /* Input node from mic stream is no longer directly available this way */
         .outputNode=${this.outputNode}
       ></gdm-live-audio-visuals-3d>
     `;
   }
 }
 
+// Update global interface for SpeechRecognition types if not already present from a lib
 declare global {
   interface Window {
-    webkitAudioContext: typeof AudioContext;
+    SpeechRecognition: typeof SpeechRecognition;
+    webkitSpeechRecognition: typeof SpeechRecognition;
+    // SpeechGrammarList: typeof SpeechGrammarList;
+    // webkitSpeechGrammarList: typeof SpeechGrammarList;
+    // SpeechRecognitionEvent: typeof SpeechRecognitionEvent;
+    // webkitSpeechRecognitionEvent: typeof SpeechRecognitionEvent;
   }
-  // Fallback for createScriptProcessor if it's not standard on AudioContext type
-  interface AudioContext {
-    createScriptProcessor?(bufferSize: number, numberOfInputChannels: number, numberOfOutputChannels: number): ScriptProcessorNode;
-  }
+  // Fallback for createScriptProcessor was here, removed as no longer needed.
 }
 
